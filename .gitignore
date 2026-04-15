@@ -1,0 +1,42 @@
+.claude
+
+# macOS noise
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift / Xcode build output
+macos-app/.build/
+macos-app/dist/
+macos-app/Package.resolved
+macos-app/.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+
+# Node
+server/node_modules/
+
+# Local dev databases (DO NOT commit user data)
+server/coloring-book.db
+server/coloring-book.db-wal
+server/coloring-book.db-shm
+server/*.db
+server/*.db-wal
+server/*.db-shm
+
+# Notary / signing scratch
+*.dmg
+*.zip
+
+# Env files (tokens, API keys)
+.env
+.env.*
+
+# Logs
+*.log
+
+# Editor scratch
+.vscode/
+.idea/
+*.swp
