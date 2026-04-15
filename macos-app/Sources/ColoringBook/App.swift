@@ -16,10 +16,14 @@ struct ColoringBookApp: App {
     @StateObject private var session: SessionModel
 
     init() {
+        // Production server URL is hard-coded so DMG users connect with no
+        // configuration. The `SERVER` env var still overrides for local
+        // development against `http://localhost:8787`.
+        let productionURL = "https://api.colorbook.adisuresh.me"
         let base = URL(
             string: ProcessInfo.processInfo.environment["SERVER"]
-                ?? "http://localhost:8787"
-        ) ?? URL(string: "http://localhost:8787")!
+                ?? productionURL
+        ) ?? URL(string: productionURL)!
         _auth = StateObject(wrappedValue: AuthModel(base: base))
         _session = StateObject(wrappedValue: SessionModel(baseURL: base))
     }

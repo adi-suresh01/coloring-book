@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Coloring Book — color together, in real time</title>
+    <meta name="description" content="A real-time collaborative coloring app for macOS. Color with friends on actual paper-feeling pages.">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --paper:   #faf6eb;
+            --ink:     #1a1310;
+            --warm:    #c5b8a1;
+            --accent:  #e04747;
+            --desk-1:  #1a1310;
+            --desk-2:  #0f0a08;
+        }
+        html, body {
+            background: linear-gradient(135deg, var(--desk-1), var(--desk-2));
+            color: var(--paper);
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+                         system-ui, sans-serif;
+            min-height: 100vh;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+        main {
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 80px 32px 64px;
+            text-align: center;
+        }
+        .pen {
+            font-size: 56px;
+            margin-bottom: 16px;
+        }
+        h1 {
+            font-size: 2.6rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 14px;
+        }
+        .tagline {
+            font-size: 1.15rem;
+            color: var(--warm);
+            margin-bottom: 40px;
+        }
+        .download {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 16px 32px;
+            background: var(--accent);
+            color: white;
+            text-decoration: none;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 1.05rem;
+            box-shadow: 0 8px 24px rgba(224, 71, 71, 0.35);
+            transition: transform 0.12s ease, box-shadow 0.12s ease;
+        }
+        .download:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 28px rgba(224, 71, 71, 0.45);
+        }
+        .download:active { transform: translateY(0); }
+        .meta {
+            margin-top: 12px;
+            font-size: 0.85rem;
+            color: #88796a;
+        }
+
+        .features {
+            margin-top: 80px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 28px;
+            text-align: left;
+        }
+        .feature {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            padding: 22px;
+            border-radius: 12px;
+        }
+        .feature h3 {
+            font-size: 1rem;
+            margin-bottom: 8px;
+            color: var(--paper);
+        }
+        .feature p {
+            font-size: 0.9rem;
+            color: var(--warm);
+        }
+
+        .gestures {
+            margin-top: 60px;
+            text-align: left;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 12px;
+            padding: 24px 28px;
+        }
+        .gestures h2 {
+            font-size: 1.1rem;
+            margin-bottom: 14px;
+            color: var(--paper);
+        }
+        .gestures dl {
+            display: grid;
+            grid-template-columns: max-content 1fr;
+            gap: 8px 18px;
+            font-size: 0.92rem;
+        }
+        .gestures dt {
+            color: var(--accent);
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .gestures dd { color: var(--warm); }
+
+        footer {
+            text-align: center;
+            padding: 40px 32px;
+            font-size: 0.78rem;
+            color: #5c5147;
+        }
+        footer a { color: #88796a; text-decoration: none; }
+
+        @media (max-width: 640px) {
+            main { padding: 56px 24px 40px; }
+            h1 { font-size: 2rem; }
+            .pen { font-size: 44px; }
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <div class="pen">🎨</div>
+        <h1>Coloring Book</h1>
+        <p class="tagline">
+            Color together with friends, in real time, on beautifully rendered paper.
+            Bring your own pages or scan one with the camera.
+        </p>
+
+        <a class="download" href="/ColoringBook.dmg" download>
+            ↓ Download for macOS
+        </a>
+        <div class="meta">macOS 14+ · ~2&nbsp;MB · Free</div>
+
+        <div class="features">
+            <div class="feature">
+                <h3>Real-time collaboration</h3>
+                <p>Add a friend, open a shared page, and see every stroke as it happens.</p>
+            </div>
+            <div class="feature">
+                <h3>Five tools, hundreds of strokes</h3>
+                <p>Sketch&nbsp;pen, color pencil, watercolor, crayon, pastel — each rendered with its own physics.</p>
+            </div>
+            <div class="feature">
+                <h3>Trackpad as paper</h3>
+                <p>One finger to draw, two fingers to move the pen. The trackpad <em>is</em> your canvas.</p>
+            </div>
+            <div class="feature">
+                <h3>Bring any page</h3>
+                <p>Drop in a coloring book PNG, scan a sketch with your webcam, or pick a built-in design.</p>
+            </div>
+        </div>
+
+        <div class="gestures">
+            <h2>Quick controls</h2>
+            <dl>
+                <dt>Space</dt>
+                <dd>Toggle between pen mode and pointer mode</dd>
+
+                <dt>1 finger drag</dt>
+                <dd>Color (in pen mode)</dd>
+
+                <dt>2 finger drag</dt>
+                <dd>Move the pen without coloring (in pen mode), or pan the canvas (in pointer mode)</dd>
+
+                <dt>Pinch</dt>
+                <dd>Zoom in / out around the cursor</dd>
+
+                <dt>⌘0</dt>
+                <dd>Reset zoom &amp; pan</dd>
+            </dl>
+        </div>
+    </main>
+
+    <footer>
+        Built with Swift, Metal, and a Node + SQLite backend.
+        <br>
+        Source on <a href="https://github.com/adi-suresh01/coloring-book">GitHub</a>.
+    </footer>
+</body>
+</html>
