@@ -35,7 +35,7 @@ struct CurrentPage: Equatable {
 final class SessionModel: ObservableObject {
     // MARK: Drawing state (UI-facing)
     @Published var tool: Tool = .sketchpen
-    @Published var color: ArtColor = ArtColor.palette[2]     // cherry-red
+    @Published var color: ArtColor = ArtColor.defaultInk
     @Published var brushSize: CGFloat = Tool.sketchpen.defaultBrushSize
 
     @Published var isInCanvasMode: Bool = false
