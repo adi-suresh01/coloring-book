@@ -79,11 +79,13 @@ final class CanvasCoordinator: NSObject, GestureDelegate {
             }
             .store(in: &cancellables)
 
-        // Apply whatever page is currently set (e.g., from room_state on join
-        // or a later set_page broadcast).
-        session.$currentPage
-            .sink { [weak self] page in
-                self?.renderer?.setLineArt(pngData: page?.imageData)
+        // Whenever the active page changes, swap the line-art texture to match.
+        // We watch both `pages` (so newly added pages get picked up) and
+        // `activePageId` (so switching pages updates the texture immediately).
+        Publishers.CombineLatest(session.$pages, session.$activePageId)
+            .sink { [weak self] pages, activeId in
+                let active = pages.first { $0.pageId == activeId }
+                self?.renderer?.setLineArt(pngData: active?.imageData)
             }
             .store(in: &cancellables)
 
@@ -147,28 +149,19 @@ final class CanvasCoordinator: NSObject, GestureDelegate {
     private func handleCanvasEvent(_ event: CanvasEvent) {
         guard let renderer = renderer else { return }
         switch event {
-        case .roomState(let strokes):
+        case .roomState(let activePageId, let strokes):
+            // Stamp only the strokes that belong to the active page.
             renderer.clear()
-            for s in strokes {
-                guard let first = s.points.first else { continue }
-                let color = SIMD4<Float>(
-                    Float(s.color.r), Float(s.color.g), Float(s.color.b), Float(s.color.a))
-                renderer.beginStroke(
-                    id: s.id,
-                    normalizedPoint: CGPoint(x: first.x, y: first.y),
-                    color: color,
-                    brushSize: CGFloat(s.brushSize),
-                    tool: s.tool
-                )
-                for p in s.points.dropFirst() {
-                    renderer.appendPoint(
-                        id: s.id,
-                        normalizedPoint: CGPoint(x: p.x, y: p.y)
-                    )
-                }
-                if s.complete { renderer.endStroke(id: s.id) }
+            let active = strokes.filter { $0.pageId == activePageId }
+            for s in active { stampStroke(s, renderer: renderer) }
+
+        case .peerStrokeStart(_, let h, let pageId, let fp):
+            // Ignore strokes for non-active pages (still recorded server-side
+            // and on this client's strokesByPage; only the visible page draws).
+            guard pageId == session?.activePageId else {
+                cachePeerStrokeForLater(header: h, pageId: pageId, firstPoint: fp)
+                return
             }
-        case .peerStrokeStart(_, let h, let fp):
             let color = SIMD4<Float>(
                 Float(h.color.r), Float(h.color.g), Float(h.color.b), Float(h.color.a))
             renderer.beginStroke(
@@ -178,25 +171,91 @@ final class CanvasCoordinator: NSObject, GestureDelegate {
                 brushSize: CGFloat(h.brushSize),
                 tool: h.tool
             )
-        case .peerStrokePoint(_, let strokeId, let p):
-            renderer.appendPoint(
-                id: strokeId,
-                normalizedPoint: CGPoint(x: p.x, y: p.y)
+            // Track in-flight peer strokes per page so we can re-stamp after
+            // a page-switch if needed.
+            inFlightPeerStrokes[h.id] = InFlightStroke(
+                pageId: pageId, header: h, points: [fp]
             )
+
+        case .peerStrokePoint(_, let strokeId, let p):
+            if var entry = inFlightPeerStrokes[strokeId] {
+                entry.points.append(p)
+                inFlightPeerStrokes[strokeId] = entry
+                if entry.pageId == session?.activePageId {
+                    renderer.appendPoint(
+                        id: strokeId, normalizedPoint: CGPoint(x: p.x, y: p.y)
+                    )
+                }
+            }
+
         case .peerStrokeEnd(_, let strokeId):
-            renderer.endStroke(id: strokeId)
-        case .pageChanged(let page):
-            renderer.setLineArt(pngData: page.flatMap { p in
-                p.imageBase64.isEmpty ? nil : Data(base64Encoded: p.imageBase64)
-            })
-        case .canvasCleared:
+            if let entry = inFlightPeerStrokes.removeValue(forKey: strokeId),
+               let session = session {
+                let stroke = Stroke(
+                    id: entry.header.id,
+                    userId: entry.header.userId,
+                    tool: entry.header.tool,
+                    color: entry.header.color,
+                    brushSize: entry.header.brushSize,
+                    points: entry.points,
+                    complete: true,
+                    pageId: entry.pageId
+                )
+                session._recordLocalStroke(stroke)
+                if entry.pageId == session.activePageId {
+                    renderer.endStroke(id: strokeId)
+                }
+            } else {
+                renderer.endStroke(id: strokeId)
+            }
+
+        case .activePageChanged:
+            // Wipe the canvas texture and re-stamp the new active page's
+            // strokes from the session's per-page index.
             renderer.clear()
-            // Re-apply current line-art page after clear (clear wipes the canvas
-            // texture; line art is a separate texture but we keep it explicit).
-            if let data = session?.currentPage?.imageData {
-                renderer.setLineArt(pngData: data)
+            if let session = session {
+                for s in session.strokesForActivePage() {
+                    stampStroke(s, renderer: renderer)
+                }
+            }
+
+        case .activePageStrokesCleared(let pageId):
+            if pageId == session?.activePageId {
+                renderer.clear()
             }
         }
+    }
+
+    private func stampStroke(_ s: Stroke, renderer: Renderer) {
+        guard let first = s.points.first else { return }
+        let color = SIMD4<Float>(
+            Float(s.color.r), Float(s.color.g), Float(s.color.b), Float(s.color.a))
+        renderer.beginStroke(
+            id: s.id,
+            normalizedPoint: CGPoint(x: first.x, y: first.y),
+            color: color,
+            brushSize: CGFloat(s.brushSize),
+            tool: s.tool
+        )
+        for p in s.points.dropFirst() {
+            renderer.appendPoint(id: s.id, normalizedPoint: CGPoint(x: p.x, y: p.y))
+        }
+        if s.complete { renderer.endStroke(id: s.id) }
+    }
+
+    private struct InFlightStroke {
+        let pageId: String
+        let header: StrokeHeader
+        var points: [StrokePoint]
+    }
+    private var inFlightPeerStrokes: [String: InFlightStroke] = [:]
+
+    private func cachePeerStrokeForLater(
+        header: StrokeHeader, pageId: String, firstPoint: StrokePoint
+    ) {
+        inFlightPeerStrokes[header.id] = InFlightStroke(
+            pageId: pageId, header: header, points: [firstPoint]
+        )
     }
 
     // MARK: GestureDelegate
@@ -224,11 +283,21 @@ final class CanvasCoordinator: NSObject, GestureDelegate {
 
     func gestureDidStartStroke(at pos: CGPoint) {
         guard let renderer = renderer, let session = session,
-              !session.currentUserId.isEmpty else { return }
+              !session.currentUserId.isEmpty,
+              let pageId = session.activePageId else { return }
         let strokeId = UUID().uuidString
         currentStrokeId = strokeId
+        currentLocalStrokePageId = pageId
         let wireColor = WireColor(r: session.color.r, g: session.color.g,
                                   b: session.color.b, a: 1)
+        currentLocalStrokeHeader = StrokeHeader(
+            id: strokeId,
+            userId: session.currentUserId,
+            tool: session.tool,
+            color: wireColor,
+            brushSize: Double(session.brushSize)
+        )
+        currentLocalStrokePoints = []
         let simdColor = SIMD4<Float>(
             Float(session.color.r), Float(session.color.g), Float(session.color.b), 1)
         renderer.beginStroke(
@@ -238,14 +307,19 @@ final class CanvasCoordinator: NSObject, GestureDelegate {
             brushSize: session.brushSize,
             tool: session.tool
         )
+        let firstPoint = StrokePoint(
+            x: Double(pos.x), y: Double(pos.y),
+            pressure: 1.0, t: Date().timeIntervalSince1970
+        )
+        currentLocalStrokePoints.append(firstPoint)
         let payload = StrokeStartPayload(
             id: strokeId,
             userId: session.currentUserId,
             tool: session.tool,
             color: wireColor,
             brushSize: Double(session.brushSize),
-            point: StrokePoint(x: Double(pos.x), y: Double(pos.y),
-                               pressure: 1.0, t: Date().timeIntervalSince1970)
+            pageId: pageId,
+            point: firstPoint
         )
         session.network.send(.strokeStart(payload))
     }
@@ -256,15 +330,35 @@ final class CanvasCoordinator: NSObject, GestureDelegate {
         renderer.appendPoint(id: id, normalizedPoint: pos)
         let point = StrokePoint(x: Double(pos.x), y: Double(pos.y),
                                 pressure: 1.0, t: Date().timeIntervalSince1970)
+        currentLocalStrokePoints.append(point)
         session.network.send(.strokePoint(strokeId: id, point: point))
     }
 
     func gestureDidEndStroke() {
         guard let renderer = renderer, let session = session,
-              let id = currentStrokeId else { return }
+              let id = currentStrokeId,
+              let header = currentLocalStrokeHeader,
+              let pageId = currentLocalStrokePageId else { return }
         renderer.endStroke(id: id)
+        let stroke = Stroke(
+            id: header.id,
+            userId: header.userId,
+            tool: header.tool,
+            color: header.color,
+            brushSize: header.brushSize,
+            points: currentLocalStrokePoints,
+            complete: true,
+            pageId: pageId
+        )
+        session._recordLocalStroke(stroke)
         session.network.send(.strokeEnd(strokeId: id))
         currentStrokeId = nil
+        currentLocalStrokeHeader = nil
+        currentLocalStrokePageId = nil
+        currentLocalStrokePoints = []
     }
 
+    private var currentLocalStrokeHeader: StrokeHeader?
+    private var currentLocalStrokePageId: String?
+    private var currentLocalStrokePoints: [StrokePoint] = []
 }

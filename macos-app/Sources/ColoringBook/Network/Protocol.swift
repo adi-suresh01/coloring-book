@@ -7,11 +7,13 @@ enum ClientMessage: Encodable {
     case strokePoint(strokeId: String, point: StrokePoint)
     case strokeEnd(strokeId: String)
     case cursor(x: Double, y: Double)
-    case setPage(WirePage?)
+    case addPage(WirePage)
+    case selectPage(pageId: String)
+    case deletePage(pageId: String)
     case clearCanvas
 
     private enum CodingKeys: String, CodingKey {
-        case type, stroke, strokeId, point, x, y, page
+        case type, stroke, strokeId, point, x, y, page, pageId
     }
 
     func encode(to encoder: Encoder) throws {
@@ -31,9 +33,15 @@ enum ClientMessage: Encodable {
             try c.encode("cursor", forKey: .type)
             try c.encode(x, forKey: .x)
             try c.encode(y, forKey: .y)
-        case .setPage(let page):
-            try c.encode("set_page", forKey: .type)
+        case .addPage(let page):
+            try c.encode("add_page", forKey: .type)
             try c.encode(page, forKey: .page)
+        case .selectPage(let pageId):
+            try c.encode("select_page", forKey: .type)
+            try c.encode(pageId, forKey: .pageId)
+        case .deletePage(let pageId):
+            try c.encode("delete_page", forKey: .type)
+            try c.encode(pageId, forKey: .pageId)
         case .clearCanvas:
             try c.encode("clear_canvas", forKey: .type)
         }
@@ -42,7 +50,7 @@ enum ClientMessage: Encodable {
 
 /// A page of line art (transparent PNG) shared across a room. The `imageBase64`
 /// may be an empty string for blank-paper pages.
-struct WirePage: Codable, Equatable {
+struct WirePage: Codable, Equatable, Hashable {
     let pageId: String
     let displayName: String
     let mimeType: String
@@ -55,6 +63,7 @@ struct StrokeStartPayload: Codable {
     let tool: Tool
     let color: WireColor
     let brushSize: Double
+    let pageId: String
     let point: StrokePoint
 }
 
@@ -68,12 +77,14 @@ struct WireStroke: Decodable {
     let tool: Tool
     let color: WireColor
     let brushSize: Double
+    let pageId: String
     let points: [StrokePoint]
     let complete: Bool
 
     func toStroke() -> Stroke {
         Stroke(id: id, userId: userId, tool: tool, color: color,
-               brushSize: brushSize, points: points, complete: complete)
+               brushSize: brushSize, points: points, complete: complete,
+               pageId: pageId)
     }
 }
 
@@ -87,17 +98,29 @@ struct RoomStateMessage: Decodable {
     let strokes: [WireStroke]
     let peers: [WirePeer]
     let you: You
-    let page: WirePage?
+    let pages: [WirePage]
+    let activePageId: String?
     struct You: Decodable { let userId: String }
 }
 
-struct PageChangedMessage: Decodable {
+struct PageAddedMessage: Decodable {
     let userId: String
-    let page: WirePage?
+    let page: WirePage
+}
+
+struct PageSelectedMessage: Decodable {
+    let userId: String
+    let pageId: String
+}
+
+struct PageDeletedMessage: Decodable {
+    let userId: String
+    let pageId: String
 }
 
 struct CanvasClearedMessage: Decodable {
     let userId: String
+    let pageId: String
 }
 
 struct PeerJoinedMessage: Decodable { let peer: WirePeer }
@@ -109,6 +132,7 @@ struct WireStrokeStart: Decodable {
     let tool: Tool
     let color: WireColor
     let brushSize: Double
+    let pageId: String
     let point: StrokePoint
 }
 

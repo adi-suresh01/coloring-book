@@ -121,10 +121,11 @@ export function startServer(port: number, dbPath: string): void {
 
     send(ws, {
       type: "room_state",
-      strokes: room.snapshotStrokes(),
       peers: room.snapshotPeers(),
       you: { userId: peer.userId },
-      page: room.snapshotPage(),
+      pages: room.snapshotPages(),
+      activePageId: room.snapshotActivePageId(),
+      strokes: room.snapshotStrokes(),
     });
     room.addMember(peer, ws);
 
@@ -153,11 +154,17 @@ export function startServer(port: number, dbPath: string): void {
         case "cursor":
           room.updateCursor(peer.userId, msg.x, msg.y);
           break;
-        case "set_page":
-          room.setPage(peer.userId, msg.page);
+        case "add_page":
+          room.addPage(peer.userId, msg.page);
+          break;
+        case "select_page":
+          room.selectPage(peer.userId, msg.pageId);
+          break;
+        case "delete_page":
+          room.deletePage(peer.userId, msg.pageId);
           break;
         case "clear_canvas":
-          room.clearCanvas(peer.userId);
+          room.clearActivePageStrokes(peer.userId);
           break;
       }
     });

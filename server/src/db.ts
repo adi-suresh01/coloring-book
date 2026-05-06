@@ -60,17 +60,30 @@ export interface Store {
   listPendingRequests(userId: string): PendingRequest[];
   areFriends(a: string, b: string): boolean;
 
-  // Rooms / strokes (unchanged semantics from before)
+  // Rooms
   ensureRoom(id: string): void;
   touchRoom(id: string): void;
-  getPage(id: string): Page | null;
-  setPage(id: string, page: Page | null): void;
-  loadStrokes(roomId: string): Stroke[];
-  insertStroke(roomId: string, stroke: Stroke): void;
-  clearStrokes(roomId: string): void;
+  getActivePageId(roomId: string): string | null;
+  setActivePageId(roomId: string, pageId: string | null): void;
+
+  // Pages (multi-page-per-room)
+  listPages(roomId: string): Page[];
+  insertPage(roomId: string, page: Page, position: number): void;
+  deletePage(pageId: string): void;
+  pageExists(pageId: string): boolean;
+
+  // Strokes (now scoped to a page within a room)
+  loadStrokes(roomId: string): StoredStroke[];
+  loadStrokesForPage(pageId: string): StoredStroke[];
+  insertStroke(roomId: string, pageId: string, stroke: Stroke): void;
+  clearStrokesForPage(pageId: string): void;
 
   close(): void;
 }
+
+/// Strokes returned from the store carry the `pageId` they belong to so the
+/// caller can demux per page without a separate lookup.
+export type StoredStroke = Stroke & { pageId: string };
 
 // ============================================================================
 // Migrations
@@ -135,6 +148,54 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
         ON friendships(addressee_id, status);
     `);
   },
+
+  // v3: multi-page support per room.
+  //
+  // Each room owns an ordered list of `pages`; strokes are scoped to a single
+  // page via `strokes.page_id`. Existing `current_page_*` columns on rooms
+  // become legacy; data is migrated forward into a single `pages` row per
+  // room and `rooms.active_page_id` points at it.
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS pages (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        display_name TEXT NOT NULL,
+        mime_type TEXT,
+        image_bytes BLOB,
+        position INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pages_room
+        ON pages(room_id, position);
+
+      ALTER TABLE rooms ADD COLUMN active_page_id TEXT;
+      ALTER TABLE strokes ADD COLUMN page_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_strokes_page ON strokes(page_id);
+
+      -- For each existing room with a current_page_*, materialize one row.
+      INSERT OR IGNORE INTO pages (id, room_id, display_name, mime_type, image_bytes, position, created_at)
+      SELECT
+        current_page_id,
+        id,
+        COALESCE(current_page_name, 'Page 1'),
+        current_page_mime,
+        current_page_bytes,
+        0,
+        created_at
+      FROM rooms
+      WHERE current_page_id IS NOT NULL;
+
+      UPDATE rooms
+        SET active_page_id = current_page_id
+        WHERE current_page_id IS NOT NULL;
+
+      -- Existing strokes belong to whatever page their room had at migration.
+      UPDATE strokes
+        SET page_id = (SELECT active_page_id FROM rooms WHERE rooms.id = strokes.room_id)
+        WHERE page_id IS NULL;
+    `);
+  },
 ];
 
 function migrate(db: Database.Database): void {
@@ -194,6 +255,7 @@ type RoomRow = {
   current_page_name: string | null;
   current_page_mime: string | null;
   current_page_bytes: Buffer | null;
+  active_page_id: string | null;
 };
 
 type StrokeRow = {
@@ -206,6 +268,17 @@ type StrokeRow = {
   color_a: number;
   brush_size: number;
   points_json: string;
+  created_at: number;
+  page_id: string | null;
+};
+
+type PageRow = {
+  id: string;
+  room_id: string;
+  display_name: string;
+  mime_type: string | null;
+  image_bytes: Buffer | null;
+  position: number;
   created_at: number;
 };
 
@@ -325,24 +398,39 @@ export function openStore(dbPath: string): Store {
     ),
     touchRoom: db.prepare(`UPDATE rooms SET last_active_at = ? WHERE id = ?`),
     getRoom: db.prepare(`SELECT * FROM rooms WHERE id = ?`),
-    setPage: db.prepare(
-      `UPDATE rooms
-         SET current_page_id = ?, current_page_name = ?,
-             current_page_mime = ?, current_page_bytes = ?,
-             last_active_at = ?
-       WHERE id = ?`
+    setActivePageId: db.prepare(
+      `UPDATE rooms SET active_page_id = ?, last_active_at = ? WHERE id = ?`
     ),
+
+    // Pages
+    listPages: db.prepare(
+      `SELECT * FROM pages WHERE room_id = ? ORDER BY position ASC, created_at ASC`
+    ),
+    insertPage: db.prepare(
+      `INSERT OR REPLACE INTO pages
+         (id, room_id, display_name, mime_type, image_bytes, position, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ),
+    deletePage: db.prepare(`DELETE FROM pages WHERE id = ?`),
+    pageExists: db.prepare(`SELECT 1 FROM pages WHERE id = ? LIMIT 1`),
+
+    // Strokes
     loadStrokes: db.prepare(
       `SELECT * FROM strokes WHERE room_id = ? ORDER BY created_at ASC`
     ),
+    loadStrokesForPage: db.prepare(
+      `SELECT * FROM strokes WHERE page_id = ? ORDER BY created_at ASC`
+    ),
     insertStroke: db.prepare(
       `INSERT OR REPLACE INTO strokes
-         (id, room_id, user_id, tool,
+         (id, room_id, page_id, user_id, tool,
           color_r, color_g, color_b, color_a,
           brush_size, points_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ),
-    clearStrokes: db.prepare(`DELETE FROM strokes WHERE room_id = ?`),
+    clearStrokesForPage: db.prepare(
+      `DELETE FROM strokes WHERE page_id = ?`
+    ),
   };
 
   const now = () => Date.now();
@@ -485,7 +573,7 @@ export function openStore(dbPath: string): Store {
       return !!row;
     },
 
-    // --- Rooms / strokes ---
+    // --- Rooms / pages / strokes ---
 
     ensureRoom(id) {
       stmts.ensureRoom.run(id, now(), now());
@@ -493,38 +581,51 @@ export function openStore(dbPath: string): Store {
     touchRoom(id) {
       stmts.touchRoom.run(now(), id);
     },
-    getPage(id) {
-      const row = stmts.getRoom.get(id) as RoomRow | undefined;
-      if (!row || !row.current_page_id) return null;
-      return {
-        pageId: row.current_page_id,
-        displayName: row.current_page_name ?? "",
-        mimeType: row.current_page_mime ?? "image/png",
-        imageBase64: row.current_page_bytes
-          ? row.current_page_bytes.toString("base64")
-          : "",
-      };
+    getActivePageId(roomId) {
+      const row = stmts.getRoom.get(roomId) as RoomRow | undefined;
+      return row?.active_page_id ?? null;
     },
-    setPage(id, page) {
-      const bytes =
-        page && page.imageBase64
-          ? Buffer.from(page.imageBase64, "base64")
-          : null;
-      stmts.setPage.run(
-        page?.pageId ?? null,
-        page?.displayName ?? null,
-        page?.mimeType ?? null,
+    setActivePageId(roomId, pageId) {
+      stmts.setActivePageId.run(pageId, now(), roomId);
+    },
+
+    listPages(roomId) {
+      const rows = stmts.listPages.all(roomId) as PageRow[];
+      return rows.map((r) => ({
+        pageId: r.id,
+        displayName: r.display_name,
+        mimeType: r.mime_type ?? "image/png",
+        imageBase64: r.image_bytes ? r.image_bytes.toString("base64") : "",
+      }));
+    },
+    insertPage(roomId, page, position) {
+      const bytes = page.imageBase64
+        ? Buffer.from(page.imageBase64, "base64")
+        : null;
+      stmts.insertPage.run(
+        page.pageId,
+        roomId,
+        page.displayName,
+        page.mimeType ?? "image/png",
         bytes,
-        now(),
-        id
+        position,
+        now()
       );
     },
+    deletePage(pageId) {
+      stmts.deletePage.run(pageId);
+    },
+    pageExists(pageId) {
+      return !!stmts.pageExists.get(pageId);
+    },
+
     loadStrokes(roomId) {
       const rows = stmts.loadStrokes.all(roomId) as StrokeRow[];
       return rows.map((r) => ({
         id: r.id,
         userId: r.user_id,
         tool: r.tool as Tool,
+        pageId: r.page_id ?? "",
         color: {
           r: r.color_r, g: r.color_g, b: r.color_b, a: r.color_a,
         } satisfies Color,
@@ -533,10 +634,26 @@ export function openStore(dbPath: string): Store {
         complete: true,
       }));
     },
-    insertStroke(roomId, stroke) {
+    loadStrokesForPage(pageId) {
+      const rows = stmts.loadStrokesForPage.all(pageId) as StrokeRow[];
+      return rows.map((r) => ({
+        id: r.id,
+        userId: r.user_id,
+        tool: r.tool as Tool,
+        pageId: r.page_id ?? "",
+        color: {
+          r: r.color_r, g: r.color_g, b: r.color_b, a: r.color_a,
+        } satisfies Color,
+        brushSize: r.brush_size,
+        points: JSON.parse(r.points_json) as Stroke["points"],
+        complete: true,
+      }));
+    },
+    insertStroke(roomId, pageId, stroke) {
       stmts.insertStroke.run(
         stroke.id,
         roomId,
+        pageId,
         stroke.userId,
         stroke.tool,
         stroke.color.r,
@@ -548,8 +665,8 @@ export function openStore(dbPath: string): Store {
         now()
       );
     },
-    clearStrokes(roomId) {
-      stmts.clearStrokes.run(roomId);
+    clearStrokesForPage(pageId) {
+      stmts.clearStrokesForPage.run(pageId);
     },
     close() {
       db.close();

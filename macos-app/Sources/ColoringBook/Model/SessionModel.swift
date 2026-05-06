@@ -17,18 +17,30 @@ struct PeerCursor: Equatable {
 }
 
 enum CanvasEvent {
-    case roomState(strokes: [Stroke])
-    case peerStrokeStart(userId: String, header: StrokeHeader, firstPoint: StrokePoint)
+    /// Full snapshot on join / room switch. Renderer should clear and stamp
+    /// only the strokes whose pageId matches `activePageId`.
+    case roomState(activePageId: String?, strokes: [Stroke])
+    case peerStrokeStart(
+        userId: String,
+        header: StrokeHeader,
+        pageId: String,
+        firstPoint: StrokePoint
+    )
     case peerStrokePoint(userId: String, strokeId: String, point: StrokePoint)
     case peerStrokeEnd(userId: String, strokeId: String)
-    case pageChanged(page: WirePage?)
-    case canvasCleared
+    /// Active page changed. Renderer should clear and stamp only the strokes
+    /// whose pageId matches the new activePageId.
+    case activePageChanged(pageId: String?)
+    /// Active page's strokes were wiped.
+    case activePageStrokesCleared(pageId: String)
 }
 
-struct CurrentPage: Equatable {
+struct CurrentPage: Equatable, Identifiable, Hashable {
     let pageId: String
     let displayName: String
     let imageData: Data?   // nil = blank paper
+
+    var id: String { pageId }
 }
 
 @MainActor
@@ -41,24 +53,67 @@ final class SessionModel: ObservableObject {
     @Published var isInCanvasMode: Bool = false
     func toggleCanvasMode() { isInCanvasMode.toggle() }
 
-    // MARK: Current page (synced with room — broadcasts to peers on change)
-    @Published var currentPage: CurrentPage? = nil
+    // MARK: Pages — server-synced multi-page state per room.
+    @Published var pages: [CurrentPage] = []
+    @Published var activePageId: String? = nil
 
-    func setPage(_ page: CurrentPage?) {
-        currentPage = page
-        let wire: WirePage? = page.map { p in
-            WirePage(
-                pageId: p.pageId,
-                displayName: p.displayName,
-                mimeType: "image/png",
-                imageBase64: p.imageData?.base64EncodedString() ?? ""
-            )
-        }
-        network.send(.setPage(wire))
+    /// All strokes across all pages (kept so we can re-stamp when the active
+    /// page changes). Filled from `room_state` and updated as new strokes
+    /// arrive.
+    private var strokesByPage: [String: [Stroke]] = [:]
+
+    /// The active page's metadata — convenience for views.
+    var activePage: CurrentPage? {
+        guard let id = activePageId else { return nil }
+        return pages.first { $0.pageId == id }
     }
 
+    /// Add a new page to the room. The server creates the row and broadcasts
+    /// `page_added` + `page_selected`; this method also updates local state
+    /// optimistically so UI is responsive.
+    func addPage(name: String, imageData: Data?) {
+        let pageId = UUID().uuidString
+        let new = CurrentPage(pageId: pageId, displayName: name, imageData: imageData)
+        // Optimistic local update; server will confirm via page_added event.
+        pages.append(new)
+        activePageId = pageId
+        strokesByPage[pageId] = []
+        canvasEvents.send(.activePageChanged(pageId: pageId))
+
+        let wire = WirePage(
+            pageId: pageId,
+            displayName: name,
+            mimeType: "image/png",
+            imageBase64: imageData?.base64EncodedString() ?? ""
+        )
+        network.send(.addPage(wire))
+    }
+
+    /// Switch which page is active.
+    func selectPage(_ pageId: String) {
+        guard pages.contains(where: { $0.pageId == pageId }),
+              activePageId != pageId else { return }
+        activePageId = pageId
+        canvasEvents.send(.activePageChanged(pageId: pageId))
+        network.send(.selectPage(pageId: pageId))
+    }
+
+    /// Remove a page (and its strokes).
+    func deletePage(_ pageId: String) {
+        pages.removeAll { $0.pageId == pageId }
+        strokesByPage.removeValue(forKey: pageId)
+        if activePageId == pageId {
+            activePageId = pages.first?.pageId
+            canvasEvents.send(.activePageChanged(pageId: activePageId))
+        }
+        network.send(.deletePage(pageId: pageId))
+    }
+
+    /// Clears the *active* page's strokes only.
     func clearCanvas() {
-        canvasEvents.send(.canvasCleared)
+        guard let id = activePageId else { return }
+        strokesByPage[id] = []
+        canvasEvents.send(.activePageStrokesCleared(pageId: id))
         network.send(.clearCanvas)
     }
 
@@ -160,7 +215,9 @@ final class SessionModel: ObservableObject {
         peerCount = 0
         peerCursors.removeAll()
         peerColorById.removeAll()
-        currentPage = nil
+        pages = []
+        activePageId = nil
+        strokesByPage.removeAll()
     }
 
     /// Open a room (typically a DM with a friend). Disconnects the current WS
@@ -172,10 +229,25 @@ final class SessionModel: ObservableObject {
         roomDisplayName = displayName
         peerCursors.removeAll()
         peerColorById.removeAll()
-        currentPage = nil
+        pages = []
+        activePageId = nil
+        strokesByPage.removeAll()
         connectionState = .connecting
         network.disconnect()
         network.connect(roomId: id, token: token, colorHex: userColorHex)
+    }
+
+    /// Strokes for the active page only. Used by the renderer to repaint when
+    /// the active page changes.
+    func strokesForActivePage() -> [Stroke] {
+        guard let id = activePageId else { return [] }
+        return strokesByPage[id] ?? []
+    }
+
+    /// Append a stroke into the per-page index (used when a new stroke
+    /// arrives from a peer or is finalized locally).
+    fileprivate func recordStroke(_ stroke: Stroke) {
+        strokesByPage[stroke.pageId, default: []].append(stroke)
     }
 
     private static func toWSURL(_ httpURL: URL) -> URL {
@@ -205,11 +277,18 @@ final class SessionModel: ObservableObject {
             connectionState = .failed(reason)
             peerCursors.removeAll()
             peerCount = 0
-        case .roomState(let strokes, let peers, let page):
+        case .roomState(let strokes, let peers, let wirePages, let active):
             peerCount = peers.count
             for p in peers { peerColorById[p.userId] = p.color }
-            applyIncomingPage(page)
-            canvasEvents.send(.roomState(strokes: strokes))
+            // Replace pages list with server's authoritative state.
+            pages = wirePages.map { wireToPage($0) }
+            activePageId = active
+            // Demux strokes by pageId.
+            strokesByPage.removeAll()
+            for s in strokes {
+                strokesByPage[s.pageId, default: []].append(s)
+            }
+            canvasEvents.send(.roomState(activePageId: active, strokes: strokes))
         case .peerJoined(let peer):
             peerCount += 1
             peerColorById[peer.userId] = peer.color
@@ -217,8 +296,10 @@ final class SessionModel: ObservableObject {
             peerCount = max(0, peerCount - 1)
             peerCursors.removeValue(forKey: id)
             peerColorById.removeValue(forKey: id)
-        case .strokeStart(let uid, let header, let firstPoint):
-            canvasEvents.send(.peerStrokeStart(userId: uid, header: header, firstPoint: firstPoint))
+        case .strokeStart(let uid, let header, let pageId, let firstPoint):
+            canvasEvents.send(.peerStrokeStart(
+                userId: uid, header: header, pageId: pageId, firstPoint: firstPoint
+            ))
         case .strokePoint(let uid, let strokeId, let point):
             canvasEvents.send(.peerStrokePoint(userId: uid, strokeId: strokeId, point: point))
         case .strokeEnd(let uid, let strokeId):
@@ -226,27 +307,46 @@ final class SessionModel: ObservableObject {
         case .cursor(let uid, let x, let y):
             let hex = peerColorById[uid] ?? "#888888"
             peerCursors[uid] = PeerCursor(userId: uid, x: x, y: y, colorHex: hex)
-        case .pageChanged(_, let page):
-            applyIncomingPage(page)
-            canvasEvents.send(.pageChanged(page: page))
-        case .canvasCleared:
-            canvasEvents.send(.canvasCleared)
+        case .pageAdded(_, let page):
+            let cp = wireToPage(page)
+            if !pages.contains(where: { $0.pageId == cp.pageId }) {
+                pages.append(cp)
+            }
+        case .pageSelected(_, let pageId):
+            if activePageId != pageId {
+                activePageId = pageId
+                canvasEvents.send(.activePageChanged(pageId: pageId))
+            }
+        case .pageDeleted(_, let pageId):
+            pages.removeAll { $0.pageId == pageId }
+            strokesByPage.removeValue(forKey: pageId)
+            if activePageId == pageId {
+                activePageId = pages.first?.pageId
+                canvasEvents.send(.activePageChanged(pageId: activePageId))
+            }
+        case .canvasCleared(_, let pageId):
+            strokesByPage[pageId] = []
+            if activePageId == pageId {
+                canvasEvents.send(.activePageStrokesCleared(pageId: pageId))
+            }
         }
     }
 
-    private func applyIncomingPage(_ page: WirePage?) {
-        guard let page = page else {
-            currentPage = nil
-            return
-        }
-        let data: Data? = page.imageBase64.isEmpty
+    private func wireToPage(_ wire: WirePage) -> CurrentPage {
+        let data = wire.imageBase64.isEmpty
             ? nil
-            : Data(base64Encoded: page.imageBase64)
-        currentPage = CurrentPage(
-            pageId: page.pageId,
-            displayName: page.displayName,
+            : Data(base64Encoded: wire.imageBase64)
+        return CurrentPage(
+            pageId: wire.pageId,
+            displayName: wire.displayName,
             imageData: data
         )
+    }
+
+    /// Called by CanvasCoordinator when a local stroke completes (so it's
+    /// available for re-stamping when the user switches pages).
+    func _recordLocalStroke(_ stroke: Stroke) {
+        recordStroke(stroke)
     }
 
     private static func randomPleasantColorHex() -> String {

@@ -31,4 +31,5 @@ struct Stroke: Identifiable, Equatable {
     let brushSize: Double
     var points: [StrokePoint]
     var complete: Bool
+    let pageId: String
 }

@@ -7,15 +7,27 @@ final class NetworkClient {
     enum Event {
         case opened
         case closed(String)
-        case roomState(strokes: [Stroke], peers: [WirePeer], page: WirePage?)
+        case roomState(
+            strokes: [Stroke],
+            peers: [WirePeer],
+            pages: [WirePage],
+            activePageId: String?
+        )
         case peerJoined(WirePeer)
         case peerLeft(userId: String)
-        case strokeStart(userId: String, header: StrokeHeader, firstPoint: StrokePoint)
+        case strokeStart(
+            userId: String,
+            header: StrokeHeader,
+            pageId: String,
+            firstPoint: StrokePoint
+        )
         case strokePoint(userId: String, strokeId: String, point: StrokePoint)
         case strokeEnd(userId: String, strokeId: String)
         case cursor(userId: String, x: Double, y: Double)
-        case pageChanged(userId: String, page: WirePage?)
-        case canvasCleared(userId: String)
+        case pageAdded(userId: String, page: WirePage)
+        case pageSelected(userId: String, pageId: String)
+        case pageDeleted(userId: String, pageId: String)
+        case canvasCleared(userId: String, pageId: String)
     }
 
     let events = PassthroughSubject<Event, Never>()
@@ -104,7 +116,8 @@ final class NetworkClient {
                 events.send(.roomState(
                     strokes: m.strokes.map { $0.toStroke() },
                     peers: m.peers,
-                    page: m.page
+                    pages: m.pages,
+                    activePageId: m.activePageId
                 ))
             }
         case "peer_joined":
@@ -124,7 +137,12 @@ final class NetworkClient {
                     color: m.stroke.color,
                     brushSize: m.stroke.brushSize
                 )
-                events.send(.strokeStart(userId: m.userId, header: h, firstPoint: m.stroke.point))
+                events.send(.strokeStart(
+                    userId: m.userId,
+                    header: h,
+                    pageId: m.stroke.pageId,
+                    firstPoint: m.stroke.point
+                ))
             }
         case "stroke_point":
             if let m = try? decoder.decode(StrokePointMessage.self, from: data) {
@@ -138,13 +156,21 @@ final class NetworkClient {
             if let m = try? decoder.decode(CursorMessage.self, from: data) {
                 events.send(.cursor(userId: m.userId, x: m.x, y: m.y))
             }
-        case "page_changed":
-            if let m = try? decoder.decode(PageChangedMessage.self, from: data) {
-                events.send(.pageChanged(userId: m.userId, page: m.page))
+        case "page_added":
+            if let m = try? decoder.decode(PageAddedMessage.self, from: data) {
+                events.send(.pageAdded(userId: m.userId, page: m.page))
+            }
+        case "page_selected":
+            if let m = try? decoder.decode(PageSelectedMessage.self, from: data) {
+                events.send(.pageSelected(userId: m.userId, pageId: m.pageId))
+            }
+        case "page_deleted":
+            if let m = try? decoder.decode(PageDeletedMessage.self, from: data) {
+                events.send(.pageDeleted(userId: m.userId, pageId: m.pageId))
             }
         case "canvas_cleared":
             if let m = try? decoder.decode(CanvasClearedMessage.self, from: data) {
-                events.send(.canvasCleared(userId: m.userId))
+                events.send(.canvasCleared(userId: m.userId, pageId: m.pageId))
             }
         default:
             break
